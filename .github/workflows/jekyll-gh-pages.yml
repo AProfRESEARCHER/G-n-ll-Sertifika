@@ -22,16 +22,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: lts/*
-          cache: npm
+          # Cache is removed here to prevent the "lock file not found" error
 
       - name: Install
-        run: npm ci
+        run: npm install # Changed from 'ci' to 'install' to work without a lockfile
 
       - name: Build
         run: npm run build
@@ -40,9 +40,9 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v3
         with:
-          path: ./dist
+          path: ./dist # Ensure your build output actually goes to a folder named 'dist'
 
       - name: Deploy
         id: deployment
