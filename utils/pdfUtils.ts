@@ -181,7 +181,7 @@ export const generateCertificatePDF = async (data: CertificateInput) => {
   setFont('bold');
   doc.setFontSize(56);
   doc.setTextColor(241, 245, 249);
-  // @ts-expect-error angle option supported in jsPDF 2.x
+
   doc.text('PROFRESEARCHERS', centerX, pageHeight / 2 + 10, { align: 'center', angle: 18 });
   doc.restoreGraphicsState();
 
