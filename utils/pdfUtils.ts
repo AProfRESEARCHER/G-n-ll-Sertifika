@@ -1,4 +1,5 @@
 import { jsPDF } from 'jspdf';
+import QRCode from 'qrcode';
 import { CertificateData } from '../types';
 
 type CertificateExtras = {
@@ -13,8 +14,6 @@ type CertificateExtras = {
 type CertificateInput = CertificateData & CertificateExtras;
 
 // ---------- Helper: Transliterate Turkish to ASCII ----------
-// Used ONLY as a catastrophic fallback if fonts absolutely fail to load.
-// This prevents the PDF from crashing or showing "0" rectangles.
 const sanitizeText = (text: string): string => {
   return text
     .replace(/ğ/g, 'g').replace(/Ğ/g, 'G')
@@ -27,27 +26,21 @@ const sanitizeText = (text: string): string => {
 };
 
 // ---------- Font loading (Unicode-safe) ----------
-
-// Convert ArrayBuffer -> base64 (chunked for safety)
 const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
   const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000; 
+  const chunkSize = 0x8000;
   let binary = '';
-
   for (let i = 0; i < bytes.length; i += chunkSize) {
     const chunk = bytes.subarray(i, i + chunkSize);
     binary += String.fromCharCode(...chunk);
   }
-
   return btoa(binary);
 };
 
 const fetchFirstAvailable = async (urls: string[]): Promise<ArrayBuffer> => {
   let lastErr: unknown = null;
-
   for (const url of urls) {
     try {
-      // mode: 'cors' is crucial for CDN font fetching
       const res = await fetch(url, { mode: 'cors', cache: 'force-cache' });
       if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
       return await res.arrayBuffer();
@@ -56,42 +49,45 @@ const fetchFirstAvailable = async (urls: string[]): Promise<ArrayBuffer> => {
       lastErr = e;
     }
   }
-
   throw lastErr ?? new Error('All font mirrors failed.');
 };
 
-// Returns true if fonts loaded successfully, false otherwise.
 const loadCustomFonts = async (doc: jsPDF): Promise<boolean> => {
   try {
-    // Using Cloudflare CDN (cdnjs) which is extremely reliable for pdfmake/Roboto
     const regularBuf = await fetchFirstAvailable([
       'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.66/fonts/Roboto/Roboto-Regular.ttf',
       'https://fonts.gstatic.com/s/roboto/v30/KFOmCnqEu92Fr1Me5Q.ttf'
     ]);
 
     const boldBuf = await fetchFirstAvailable([
-      'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.66/fonts/Roboto/Roboto-Medium.ttf', // Medium often works better as Bold in PDF
+      'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.66/fonts/Roboto/Roboto-Medium.ttf',
       'https://fonts.gstatic.com/s/roboto/v30/KFOlCnqEu92Fr1MmWUlfBBc4.ttf'
     ]);
 
-    const regularB64 = arrayBufferToBase64(regularBuf);
-    const boldB64 = arrayBufferToBase64(boldBuf);
-
-    doc.addFileToVFS('Roboto-Regular.ttf', regularB64);
+    doc.addFileToVFS('Roboto-Regular.ttf', arrayBufferToBase64(regularBuf));
     doc.addFont('Roboto-Regular.ttf', 'Roboto', 'normal');
 
-    doc.addFileToVFS('Roboto-Bold.ttf', boldB64);
+    doc.addFileToVFS('Roboto-Bold.ttf', arrayBufferToBase64(boldBuf));
     doc.addFont('Roboto-Bold.ttf', 'Roboto', 'bold');
-    
+
     return true;
   } catch (e) {
-    console.error("CRITICAL: Font loading failed. Turkish characters will be transliterated.", e);
+    console.error('CRITICAL: Font loading failed. Turkish characters will be transliterated.', e);
     return false;
   }
 };
 
-// ---------- Decorations ----------
+// ---------- QR helper ----------
+const buildQrDataUrl = async (url: string): Promise<string> => {
+  return QRCode.toDataURL(url, {
+    errorCorrectionLevel: 'M',
+    margin: 1,
+    scale: 8,
+    color: { dark: '#0f172a', light: '#ffffff' }
+  });
+};
 
+// ---------- Decorations ----------
 const drawAtom = (doc: jsPDF, x: number, y: number, scale: number) => {
   doc.setDrawColor(71, 85, 105);
   doc.setLineWidth(0.4 * scale);
@@ -150,37 +146,25 @@ const drawMicroscope = (doc: jsPDF, x: number, y: number, scale: number) => {
 };
 
 // ---------- Main generator ----------
-
 export const generateCertificatePDF = async (data: CertificateInput) => {
-  const doc = new jsPDF({
-    orientation: 'landscape',
-    unit: 'mm',
-    format: 'a4'
-  });
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
 
-  // Attempt to load custom fonts. 
   const fontLoaded = await loadCustomFonts(doc);
+  const t = (text: string) => (fontLoaded ? text : sanitizeText(text));
 
-  // If font loaded, use text as-is (Turkish supported).
-  // If font failed, sanitize to ASCII (English letters) to prevent garbage.
-  const t = (text: string) => fontLoaded ? text : sanitizeText(text);
-
-  // Helper: Set font based on availability
   const setFont = (style: 'normal' | 'bold') => {
-    if (fontLoaded) {
-      doc.setFont('Roboto', style);
-    } else {
-      doc.setFont('times', style);
-    }
+    if (fontLoaded) doc.setFont('Roboto', style);
+    else doc.setFont('times', style);
   };
 
-  setFont('normal');
+  // Build QR (GitHub)
+  const qrUrl = 'https://github.com/ProfResearchers';
+  const qrDataUrl = await buildQrDataUrl(qrUrl);
 
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
   const centerX = pageWidth / 2;
 
-  // Optional fields with professional defaults
   const institution = data.institution ?? 'Tıpta Profesyonellik Bloğu';
   const unit = data.departmentOrUnit ?? 'Bilimsel Araştırmalar ve Uygulamalar';
   const coordinatorTitle = data.coordinatorTitle ?? 'Koordinatör';
@@ -191,6 +175,15 @@ export const generateCertificatePDF = async (data: CertificateInput) => {
   // Background
   doc.setFillColor(255, 255, 255);
   doc.rect(0, 0, pageWidth, pageHeight, 'F');
+
+  // Subtle watermark
+  doc.saveGraphicsState();
+  setFont('bold');
+  doc.setFontSize(56);
+  doc.setTextColor(241, 245, 249);
+  // @ts-expect-error angle option supported in jsPDF 2.x
+  doc.text('PROFRESEARCHERS', centerX, pageHeight / 2 + 10, { align: 'center', angle: 18 });
+  doc.restoreGraphicsState();
 
   // Borders
   doc.setDrawColor(8, 51, 68);
@@ -218,9 +211,9 @@ export const generateCertificatePDF = async (data: CertificateInput) => {
   drawMicroscope(doc, centerX, 36, 0.9);
 
   // Institution lines
+  setFont('normal');
   doc.setFontSize(12);
   doc.setTextColor(51, 65, 85);
-  setFont('normal');
   doc.text(t(institution), centerX, 55, { align: 'center' });
 
   doc.setFontSize(10.5);
@@ -233,19 +226,22 @@ export const generateCertificatePDF = async (data: CertificateInput) => {
   doc.setTextColor(22, 78, 99);
   doc.text(t('GÖNÜLLÜ KATILIM SERTİFİKASI'), centerX, 78, { align: 'center' });
 
+  // Accent line under title
+  doc.setDrawColor(203, 213, 225);
+  doc.setLineWidth(0.6);
+  doc.line(centerX - 55, 82, centerX + 55, 82);
+
   // Intro paragraph
   setFont('normal');
   doc.setFontSize(14);
   doc.setTextColor(51, 65, 85);
 
-  const introRaw = 'Bu sertifika, yürütülen bilimsel çalışmalara gönüllü katılımı ve sunduğu değerli katkılar nedeniyle aşağıda adı yazılı katılımcıya takdim edilmiştir.';
-  const intro = t(introRaw);
-  const introLines = doc.splitTextToSize(intro, pageWidth - 90);
+  const introRaw =
+    'Bu sertifika, yürütülen bilimsel çalışmalara gönüllü katılımı ve sunduğu değerli katkılar nedeniyle aşağıda adı yazılı katılımcıya takdim edilmiştir.';
+  const introLines = doc.splitTextToSize(t(introRaw), pageWidth - 90);
   doc.text(introLines, centerX, 92, { align: 'center', lineHeightFactor: 1.45 });
 
   // Name (dynamic sizing)
-  // We use standard toLocaleUpperCase. 
-  // IMPORTANT: We do NOT force sanitized ASCII if font is loaded.
   const rawName = data.name.toLocaleUpperCase('tr-TR');
   const cleanName = t(rawName);
 
@@ -269,41 +265,62 @@ export const generateCertificatePDF = async (data: CertificateInput) => {
   doc.setLineWidth(0.5);
   doc.line(centerX - 55, nameY + 8, centerX + 55, nameY + 8);
 
-  // Optional impact message
+  // Impact message
   const impactRaw = (data.impactMessage ?? '').trim();
-  const impactTextBase = impactRaw.length > 0
+  const impactTextBase =
+    impactRaw.length > 0
       ? impactRaw
       : 'Katkılarınız, araştırma sürecimizin niteliğini ve güvenilirliğini güçlendirmiştir.';
-  
-  const impactText = t(impactTextBase);
 
   setFont('normal');
   doc.setFontSize(12.5);
   doc.setTextColor(71, 85, 105);
 
-  const impactLines = doc.splitTextToSize(impactText, pageWidth - 100);
+  const impactLines = doc.splitTextToSize(t(impactTextBase), pageWidth - 100);
   const impactY = 142;
   doc.text(impactLines, centerX, impactY, { align: 'center', lineHeightFactor: 1.5 });
 
   // Closing line
   doc.setFontSize(12.5);
   doc.setTextColor(51, 65, 85);
-  const closingRaw = 'Sayın katılımcımıza teşekkür eder, akademik ve mesleki yaşamında başarılarının devamını dileriz.';
-  const closing = t(closingRaw);
-  
+  const closingRaw =
+    'Sayın katılımcımıza teşekkür eder, akademik ve mesleki yaşamında başarılarının devamını dileriz.';
+  const closingLines = doc.splitTextToSize(t(closingRaw), pageWidth - 90);
+
   const closingY = impactY + impactLines.length * 7.2 + 8;
-  const closingLines = doc.splitTextToSize(closing, pageWidth - 90);
   doc.text(closingLines, centerX, closingY, { align: 'center', lineHeightFactor: 1.35 });
 
   // Footer
   const footerY = pageHeight - 28;
 
-  // Left: location + date + certificate no
+  // QR card (left)
+  const qrSize = 24;
+  const qrCardPadding = 3;
+  const qrX = 18;
+  const qrY = pageHeight - 44;
+
+  // Card background
+  doc.setFillColor(248, 250, 252);
+  doc.setDrawColor(203, 213, 225);
+  doc.setLineWidth(0.6);
+  doc.roundedRect(qrX - qrCardPadding, qrY - qrCardPadding, qrSize + qrCardPadding * 2, qrSize + qrCardPadding * 2, 2.5, 2.5, 'FD');
+
+  // QR image
+  doc.addImage(qrDataUrl, 'PNG', qrX, qrY, qrSize, qrSize);
+
+  // Small label under QR (inside footer area)
+  setFont('bold');
+  doc.setFontSize(9);
+  doc.setTextColor(22, 78, 99);
+  doc.text('ProfResearchers', qrX + qrSize / 2, qrY + qrSize + 7, { align: 'center' });
+
+  // Left text shifted right to make room for QR
+  const leftX = qrX + qrSize + 12;
+
   setFont('normal');
   doc.setFontSize(10.5);
   doc.setTextColor(100, 116, 139);
 
-  const leftX = 30;
   const dateLabel = t('Düzenlenme Tarihi');
   const locPart = location ? `${t(location)}, ` : '';
   doc.text(`${locPart}${dateLabel}: ${data.date}`, leftX, footerY);
@@ -312,6 +329,18 @@ export const generateCertificatePDF = async (data: CertificateInput) => {
     doc.setFontSize(9.5);
     doc.text(`${t('Belge No')}: ${certificateNo}`, leftX, footerY + 6);
   }
+
+  // GitHub URL (clickable area)
+  doc.setFontSize(9.5);
+  doc.setTextColor(22, 78, 99);
+  const urlText = t('Doğrulama / GitHub: ') + qrUrl;
+  doc.text(urlText, leftX, footerY + 12);
+
+  // clickable link rectangle (only on URL part)
+  const prefix = t('Doğrulama / GitHub: ');
+  const prefixW = doc.getTextWidth(prefix);
+  const urlW = doc.getTextWidth(qrUrl);
+  doc.link(leftX + prefixW, footerY + 12 - 4, urlW, 6, { url: qrUrl });
 
   // Right: signature
   const sigX = pageWidth - 78;
@@ -332,7 +361,6 @@ export const generateCertificatePDF = async (data: CertificateInput) => {
   }
 
   // Save
-  // We sanitize the filename just to be safe for OS file systems
   const safeFileName = sanitizeText(data.name)
     .trim()
     .replace(/\s+/g, '_')
